@@ -7,8 +7,11 @@ import (
 	"path"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type profile struct {
@@ -30,6 +33,9 @@ const (
 
 	displayWidthDefault  = 300
 	displayHeightDefault = 300
+
+	keypressDisplayLoginCmd = "l"
+	keypressClose           = "esc"
 
 	configKeyRegion    = "region"
 	configKeyAccountID = "sso_account_id"
@@ -113,19 +119,75 @@ func parseConfig(filepath string) ([]list.Item, error) {
 	return profiles, nil
 }
 
+type state int
+
+const (
+	stateListing state = iota
+	stateDisplayLoginCmd
+)
+
 type model struct {
-	l list.Model
+	l       list.Model
+	s       state
+	selItem list.Item
+	h       help.Model
 }
 
 func (m model) Init() tea.Cmd {
+	m.s = stateListing
+	m.h = help.New()
 	return nil
+}
+
+func (m model) displayLoginCmd() (tea.Model, tea.Cmd) {
+	selItem := m.l.SelectedItem()
+	if m.s == stateDisplayLoginCmd || selItem == nil {
+		return m, nil
+	}
+
+	m.s = stateDisplayLoginCmd
+	m.selItem = selItem
+	return m, nil
+}
+
+func fatalInvalidState(s state) {
+	log.Fatalln("invalid app state:", s)
+}
+
+func (m model) close(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch m.s {
+	case stateDisplayLoginCmd:
+		m.s = stateListing
+		m.selItem = nil
+		return m, nil
+	case stateListing:
+		var cmd tea.Cmd
+		m.l, cmd = m.l.Update(msg)
+		return m, cmd
+	default:
+		fatalInvalidState(m.s)
+		return m, nil
+	}
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.h.Width = msg.Width
 		m.l.SetWidth(msg.Width)
 		m.l.SetHeight(msg.Height)
+		return m, nil
+	case tea.KeyMsg:
+		keypress := msg.String()
+		switch keypress {
+		case keypressDisplayLoginCmd:
+			return m.displayLoginCmd()
+		case keypressClose:
+			return m.close(msg)
+		}
+	}
+
+	if m.s != stateListing {
 		return m, nil
 	}
 
@@ -134,8 +196,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+type keyMap struct {
+	shortHelp []key.Binding
+	fullHelp  [][]key.Binding
+}
+
+func (mkm keyMap) ShortHelp() []key.Binding {
+	return mkm.shortHelp
+}
+
+func (mkm keyMap) FullHelp() [][]key.Binding {
+	return mkm.fullHelp
+}
+
+var (
+	simpleModalWinKeyMap = keyMap{
+		shortHelp: []key.Binding{
+			key.NewBinding(key.WithKeys(keypressClose), key.WithHelp(keypressClose, "go back")),
+		},
+	}
+
+	simpleHelpStyle = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"})
+)
+
+func (m model) renderLoginCmd(i list.Item) string {
+	p := i.(*profile)
+	cmd := fmt.Sprintf("aws sso login --profile %v", p.name)
+
+	helpText := m.h.View(simpleModalWinKeyMap)
+	h := simpleHelpStyle.Render(helpText)
+
+	return fmt.Sprintf("%v\n\n%v", cmd, h)
+}
+
 func (m model) View() string {
-	return m.l.View()
+	switch m.s {
+	case stateDisplayLoginCmd:
+		return m.renderLoginCmd(m.selItem)
+	case stateListing:
+		return m.l.View()
+	default:
+		fatalInvalidState(m.s)
+		return ""
+	}
 }
 
 func main() {
@@ -152,6 +255,18 @@ func main() {
 
 	l := list.New(profiles, list.NewDefaultDelegate(), displayWidthDefault, displayHeightDefault)
 	l.Title = "Your AWS Profiles"
+	l.AdditionalShortHelpKeys = func() []key.Binding {
+		return []key.Binding{key.NewBinding(
+			key.WithKeys(keypressDisplayLoginCmd),
+			key.WithHelp(keypressDisplayLoginCmd, "view login cmd"),
+		)}
+	}
+	l.AdditionalFullHelpKeys = func() []key.Binding {
+		return []key.Binding{key.NewBinding(
+			key.WithKeys(keypressDisplayLoginCmd),
+			key.WithHelp(keypressDisplayLoginCmd, "render login cmd with the selected profile"),
+		)}
+	}
 
 	m := model{l: l}
 
